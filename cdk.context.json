@@ -1,0 +1,63 @@
+{
+  "vpc-provider:account=030593571717:filter.tag:Name=AriefhInfraStack/dev-vpc:region=ap-southeast-1:returnAsymmetricSubnets=true": {
+    "vpcId": "vpc-0c88f9e7eea835ede",
+    "vpcCidrBlock": "10.1.0.0/16",
+    "availabilityZones": [],
+    "subnetGroups": [
+      {
+        "name": "private",
+        "type": "Private",
+        "subnets": [
+          {
+            "subnetId": "subnet-06a83e2d888c771cb",
+            "cidr": "10.1.2.0/24",
+            "availabilityZone": "ap-southeast-1a",
+            "routeTableId": "rtb-0b1bc82eef7c1b692"
+          },
+          {
+            "subnetId": "subnet-088916c243afe63db",
+            "cidr": "10.1.3.0/24",
+            "availabilityZone": "ap-southeast-1b",
+            "routeTableId": "rtb-02181c88a0861dd82"
+          }
+        ]
+      },
+      {
+        "name": "public",
+        "type": "Public",
+        "subnets": [
+          {
+            "subnetId": "subnet-01b9c96170aab6c59",
+            "cidr": "10.1.0.0/24",
+            "availabilityZone": "ap-southeast-1a",
+            "routeTableId": "rtb-0bb3fe203ec8ea0f1"
+          },
+          {
+            "subnetId": "subnet-075136b2cea91ef03",
+            "cidr": "10.1.1.0/24",
+            "availabilityZone": "ap-southeast-1b",
+            "routeTableId": "rtb-08627741b9311e0e7"
+          }
+        ]
+      },
+      {
+        "name": "isolated",
+        "type": "Isolated",
+        "subnets": [
+          {
+            "subnetId": "subnet-079d198dd86ac5a35",
+            "cidr": "10.1.4.0/28",
+            "availabilityZone": "ap-southeast-1a",
+            "routeTableId": "rtb-0c437c0e570af9e2a"
+          },
+          {
+            "subnetId": "subnet-0d0f0a47dadae1d8a",
+            "cidr": "10.1.4.16/28",
+            "availabilityZone": "ap-southeast-1b",
+            "routeTableId": "rtb-0831d9a9ff132c431"
+          }
+        ]
+      }
+    ]
+  }
+}
