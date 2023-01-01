@@ -7,23 +7,55 @@ import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as rds from 'aws-cdk-lib/aws-rds';
 import * as ecs_patterns from 'aws-cdk-lib/aws-ecs-patterns';
+import { ListenerCertificate } from 'aws-cdk-lib/aws-elasticloadbalancingv2';
+import { Duration } from 'aws-cdk-lib';
 
 export class OdooEcsStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
     const serviceName = 'my-service';
-    const databaseName = 'odoo-db';
-    const databaseUsername = 'odoo-admin';
+    const databaseName = 'odoodb';
+    const databaseAdmin = 'odooadmin';
+    // const databaseUser = 'odoouser';
     const stage = 'dev';
+
+    const firstTime = true;
+    const desiredCount = firstTime ? 1 : 2;
+    const skipBootstrap = firstTime ? 'no' : 'yes';
+    const loadDemoData = firstTime ? 'yes' : 'no';
 
     const vpc = ec2.Vpc.fromLookup(this, 'dev-vpc', {vpcName: 'AriefhInfraStack/dev-vpc'});
     const appCidr = vpc.privateSubnets[0].ipv4CidrBlock;
 
-    const databaseCredentialsSecret = new secrets_manager.Secret(this, 'DBCredentialsSecret', {
-      secretName: `${serviceName}-${stage}-credentials`,
+    const dbAdminCredsSecret = new secrets_manager.Secret(this, 'DBAdminCredsSecret', {
+      secretName: `${serviceName}-${stage}-admin-credentials`,
       generateSecretString: {
         secretStringTemplate: JSON.stringify({
-          username: databaseUsername,
+          username: databaseAdmin,
+        }),
+        excludePunctuation: true,
+        includeSpace: false,
+        generateStringKey: 'password'
+      }
+    });
+
+    // const odooUserCredsSecret = new secrets_manager.Secret(this, 'OdooUserCredsSecret', {
+    //   secretName: `${serviceName}-${stage}-user-credentials`,
+    //   generateSecretString: {
+    //     secretStringTemplate: JSON.stringify({
+    //       username: databaseUser,
+    //     }),
+    //     excludePunctuation: true,
+    //     includeSpace: false,
+    //     generateStringKey: 'password'
+    //   }
+    // });
+
+    const odooPwdSecret = new secrets_manager.Secret(this, 'OdooAppPwdSecret', {
+      secretName: `odoo-${stage}-app-pwd`, 
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({
+          email: 'mr.arief.hidayat@gmail.com',
         }),
         excludePunctuation: true,
         includeSpace: false,
@@ -43,7 +75,7 @@ export class OdooEcsStack extends cdk.Stack {
     const rdsInstance = new rds.DatabaseInstance(this, 'OdooDB', {
       engine: rds.DatabaseInstanceEngine.postgres({ version: rds.PostgresEngineVersion.VER_14_5 }),
       instanceType: ec2.InstanceType.of(ec2.InstanceClass.M5, ec2.InstanceSize.LARGE),
-      credentials: rds.Credentials.fromSecret(databaseCredentialsSecret),
+      credentials: rds.Credentials.fromSecret(dbAdminCredsSecret),
       vpc,
       vpcSubnets: {
         subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
@@ -60,22 +92,38 @@ export class OdooEcsStack extends cdk.Stack {
       memoryLimitMiB: 512,
       cpu: 256,
     });
+    // https://github.com/bitnami/containers/tree/main/bitnami/odoo#configuration
     const container = fargateTaskDefinition.addContainer("OdooCntr", {
-      image: ecs.ContainerImage.fromRegistry("odoo:16.0"),
+      image: ecs.ContainerImage.fromRegistry("bitnami/odoo:15.0.20221210-debian-11-r7"),
       environment: {
-        HOST: rdsInstance.dbInstanceEndpointAddress,
+        ODOO_SKIP_BOOTSTRAP: skipBootstrap,
+        ODOO_SKIP_MODULES_UPDATE: 'no',
+        ODOO_LOAD_DEMO_DATA: loadDemoData,
+        ODOO_DATABASE_HOST: rdsInstance.dbInstanceEndpointAddress,
+        ODOO_DATABASE_NAME: databaseName,
+        ALLOW_EMPTY_PASSWORD: 'no',
       },
       secrets: {
-        USER: ecs.Secret.fromSecretsManager(databaseCredentialsSecret, 'username'),
-        PASSWORD: ecs.Secret.fromSecretsManager(databaseCredentialsSecret, 'password')
+        ODOO_DATABASE_USER: ecs.Secret.fromSecretsManager(dbAdminCredsSecret, 'username'),
+        ODOO_DATABASE_PASSWORD: ecs.Secret.fromSecretsManager(dbAdminCredsSecret, 'password'),
+        // ODOO_DATABASE_ADMIN_USER: ecs.Secret.fromSecretsManager(dbAdminCredsSecret, 'username'),
+        // ODOO_DATABASE_ADMIN_PASSWORD: ecs.Secret.fromSecretsManager(dbAdminCredsSecret, 'password'),
+        ODOO_EMAIL: ecs.Secret.fromSecretsManager(odooPwdSecret, 'email'),
+        ODOO_PASSWORD: ecs.Secret.fromSecretsManager(odooPwdSecret, 'password'),
       },
+      // healthCheck: {
+      //   command: [ "CMD-SHELL", "curl -f http://localhost/ || exit 1" ],
+      //   startPeriod: Duration.seconds(300),
+      //   interval: Duration.seconds(30),
+      //   retries: 3,
+      // },
       portMappings: [
         {
           containerPort: 8069,
         }
       ],
+      logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'Odoo' }),
     });
-
     const service = new ecs.FargateService(this, 'Service', {
       cluster,
       taskDefinition: fargateTaskDefinition,
@@ -84,25 +132,30 @@ export class OdooEcsStack extends cdk.Stack {
         subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
       },
       securityGroups: [appSG],
-      desiredCount: 2,
+      desiredCount: desiredCount,
       maxHealthyPercent: 200,
       minHealthyPercent: 100
     });
+
     const lb = new elbv2.ApplicationLoadBalancer(this, 'LB', { vpc, internetFacing: true, securityGroup: lbSG });
     const listener = lb.addListener('Listener', { port: 80 });
-    service.registerLoadBalancerTargets(
-      {
+    const odooTargetGroup = listener.addTargets('Odoo', {
+      port: 80,
+      targetGroupName: 'OdooTarget',
+      targets: [service.loadBalancerTarget({
         containerName: 'OdooCntr',
         containerPort: 8069,
-        newTargetGroupId: 'ECS',
-        listener: ecs.ListenerConfig.applicationListener(listener, {
-          protocol: elbv2.ApplicationProtocol.HTTP,
-          healthCheck: {
-            // seems like odoo returns 303
-            healthyHttpCodes: '200,303'
-          }
-        }),
-      },
-    );
+      })],
+    });
+    odooTargetGroup.configureHealthCheck({healthyHttpCodes: '200'});
+
+    const scaling = service.autoScaleTaskCount({ maxCapacity: 10 });
+    scaling.scaleOnCpuUtilization('CpuScaling', {
+      targetUtilizationPercent: 60,
+    });
+    scaling.scaleOnRequestCount('RequestScaling', {
+      requestsPerTarget: 1000,
+      targetGroup: odooTargetGroup,
+    });
   }
 }
