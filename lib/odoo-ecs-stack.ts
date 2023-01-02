@@ -16,16 +16,22 @@ export class OdooEcsStack extends cdk.Stack {
     const serviceName = 'my-service';
     const databaseName = 'odoodb';
     const databaseAdmin = 'odooadmin';
-    // const databaseUser = 'odoouser';
     const stage = 'dev';
+    const emailAddress = 'mr.arief.hidayat@gmail.com';
 
-    const firstTime = true;
-    const desiredCount = firstTime ? 1 : 2;
+    const firstTime = false;
+    const desiredCount = firstTime ? 1 : 1;
+    // const desiredCount = firstTime ? 1 : 2;
     const skipBootstrap = firstTime ? 'no' : 'yes';
     const loadDemoData = firstTime ? 'yes' : 'no';
 
     const vpc = ec2.Vpc.fromLookup(this, 'dev-vpc', {vpcName: 'AriefhInfraStack/dev-vpc'});
-    const appCidr = vpc.privateSubnets[0].ipv4CidrBlock;
+
+    const dbSG = new ec2.SecurityGroup(this, 'DBSG', { vpc });
+    const appSG = new ec2.SecurityGroup(this, 'AppSG', { vpc });
+    const lbSG = new ec2.SecurityGroup(this, 'LBSG', { vpc });
+    dbSG.addIngressRule(ec2.Peer.securityGroupId(appSG.securityGroupId), ec2.Port.tcp(5432));
+    appSG.addIngressRule(ec2.Peer.securityGroupId(lbSG.securityGroupId), ec2.Port.tcp(80));
 
     const dbAdminCredsSecret = new secrets_manager.Secret(this, 'DBAdminCredsSecret', {
       secretName: `${serviceName}-${stage}-admin-credentials`,
@@ -38,38 +44,6 @@ export class OdooEcsStack extends cdk.Stack {
         generateStringKey: 'password'
       }
     });
-
-    // const odooUserCredsSecret = new secrets_manager.Secret(this, 'OdooUserCredsSecret', {
-    //   secretName: `${serviceName}-${stage}-user-credentials`,
-    //   generateSecretString: {
-    //     secretStringTemplate: JSON.stringify({
-    //       username: databaseUser,
-    //     }),
-    //     excludePunctuation: true,
-    //     includeSpace: false,
-    //     generateStringKey: 'password'
-    //   }
-    // });
-
-    const odooPwdSecret = new secrets_manager.Secret(this, 'OdooAppPwdSecret', {
-      secretName: `odoo-${stage}-app-pwd`, 
-      generateSecretString: {
-        secretStringTemplate: JSON.stringify({
-          email: 'mr.arief.hidayat@gmail.com',
-        }),
-        excludePunctuation: true,
-        includeSpace: false,
-        generateStringKey: 'password'
-      }
-    });
-
-    const dbSG = new ec2.SecurityGroup(this, 'DBSG', { vpc });
-    const appSG = new ec2.SecurityGroup(this, 'AppSG', { vpc });
-    const lbSG = new ec2.SecurityGroup(this, 'LBSG', { vpc });
-    dbSG.addIngressRule(ec2.Peer.securityGroupId(appSG.securityGroupId), ec2.Port.tcp(5432));
-    appSG.addIngressRule(ec2.Peer.securityGroupId(lbSG.securityGroupId), ec2.Port.tcp(80));
-    // appSG.addEgressRule(ec2.Peer.securityGroupId(dbSG.securityGroupId), ec2.Port.tcp(5432));
-    // lbSG.addEgressRule(ec2.Peer.securityGroupId(appSG.securityGroupId), ec2.Port.tcp(80));
 
     // https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.aws_rds-readme.html
     const rdsInstance = new rds.DatabaseInstance(this, 'OdooDB', {
@@ -86,14 +60,26 @@ export class OdooEcsStack extends cdk.Stack {
       securityGroups: [dbSG]
     });
 
-    const cluster = new ecs.Cluster(this, 'OdooEcsCluster', {vpc: vpc});
 
-    const fargateTaskDefinition = new ecs.FargateTaskDefinition(this, 'OdooTaskDef', {
-      memoryLimitMiB: 512,
-      cpu: 256,
+    const odooCluster = new ecs.Cluster(this, 'OdooEcsCluster', {vpc: vpc});
+
+    const odooTaskDefinition = new ecs.FargateTaskDefinition(this, 'OdooTaskDef', {
+      memoryLimitMiB: 1024,
+      cpu: 512,
+    });
+    const odooPwdSecret = new secrets_manager.Secret(this, 'OdooAppPwdSecret', {
+      secretName: `odoo-${stage}-app-pwd`, 
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({
+          email: emailAddress,
+        }),
+        excludePunctuation: true,
+        includeSpace: false,
+        generateStringKey: 'password'
+      }
     });
     // https://github.com/bitnami/containers/tree/main/bitnami/odoo#configuration
-    const container = fargateTaskDefinition.addContainer("OdooCntr", {
+    const odooContainer = odooTaskDefinition.addContainer("OdooCntr", {
       image: ecs.ContainerImage.fromRegistry("bitnami/odoo:15.0.20221210-debian-11-r7"),
       environment: {
         ODOO_SKIP_BOOTSTRAP: skipBootstrap,
@@ -106,17 +92,9 @@ export class OdooEcsStack extends cdk.Stack {
       secrets: {
         ODOO_DATABASE_USER: ecs.Secret.fromSecretsManager(dbAdminCredsSecret, 'username'),
         ODOO_DATABASE_PASSWORD: ecs.Secret.fromSecretsManager(dbAdminCredsSecret, 'password'),
-        // ODOO_DATABASE_ADMIN_USER: ecs.Secret.fromSecretsManager(dbAdminCredsSecret, 'username'),
-        // ODOO_DATABASE_ADMIN_PASSWORD: ecs.Secret.fromSecretsManager(dbAdminCredsSecret, 'password'),
         ODOO_EMAIL: ecs.Secret.fromSecretsManager(odooPwdSecret, 'email'),
         ODOO_PASSWORD: ecs.Secret.fromSecretsManager(odooPwdSecret, 'password'),
       },
-      // healthCheck: {
-      //   command: [ "CMD-SHELL", "curl -f http://localhost/ || exit 1" ],
-      //   startPeriod: Duration.seconds(300),
-      //   interval: Duration.seconds(30),
-      //   retries: 3,
-      // },
       portMappings: [
         {
           containerPort: 8069,
@@ -124,9 +102,10 @@ export class OdooEcsStack extends cdk.Stack {
       ],
       logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'Odoo' }),
     });
-    const service = new ecs.FargateService(this, 'Service', {
-      cluster,
-      taskDefinition: fargateTaskDefinition,
+
+    const odooService = new ecs.FargateService(this, 'OdooService', {
+      cluster: odooCluster,
+      taskDefinition: odooTaskDefinition,
       assignPublicIp: false,
       vpcSubnets: {
         subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
@@ -134,28 +113,117 @@ export class OdooEcsStack extends cdk.Stack {
       securityGroups: [appSG],
       desiredCount: desiredCount,
       maxHealthyPercent: 200,
-      minHealthyPercent: 100
+      minHealthyPercent: 50
     });
+    odooService.node.addDependency(rdsInstance);
 
-    const lb = new elbv2.ApplicationLoadBalancer(this, 'LB', { vpc, internetFacing: true, securityGroup: lbSG });
-    const listener = lb.addListener('Listener', { port: 80 });
-    const odooTargetGroup = listener.addTargets('Odoo', {
+    const odooLb = new elbv2.ApplicationLoadBalancer(this, 'OdooLB', { vpc, internetFacing: true, securityGroup: lbSG });
+    const odooListener = odooLb.addListener('OdooListener', { port: 80 });
+    const odooTargetGroup = odooListener.addTargets('Odoo', {
       port: 80,
       targetGroupName: 'OdooTarget',
-      targets: [service.loadBalancerTarget({
+      targets: [odooService.loadBalancerTarget({
         containerName: 'OdooCntr',
         containerPort: 8069,
       })],
+      deregistrationDelay: Duration.seconds(5),
     });
-    odooTargetGroup.configureHealthCheck({healthyHttpCodes: '200'});
+    odooTargetGroup.configureHealthCheck({
+      healthyHttpCodes: '200,303', 
+      timeout: Duration.seconds(5), 
+      interval: Duration.seconds(10), 
+      healthyThresholdCount: 2
+    });
 
-    const scaling = service.autoScaleTaskCount({ maxCapacity: 10 });
-    scaling.scaleOnCpuUtilization('CpuScaling', {
+    const odooScaling = odooService.autoScaleTaskCount({ minCapacity: desiredCount, maxCapacity: 10 });
+    odooScaling.scaleOnCpuUtilization('OdooCpuScaling', {
       targetUtilizationPercent: 60,
     });
-    scaling.scaleOnRequestCount('RequestScaling', {
-      requestsPerTarget: 1000,
+    odooScaling.scaleOnRequestCount('OdooRequestScaling', {
+      requestsPerTarget: 200,
       targetGroup: odooTargetGroup,
     });
+    new cdk.CfnOutput(this, 'odooLoadBalancer', {
+      value: `http://${odooLb.loadBalancerDnsName}`,
+      description: 'Odoo Load Balancer',
+    });
+    new cdk.CfnOutput(this, 'odooAppSecretArn', {
+      value: odooPwdSecret.secretFullArn || '',
+      description: 'Odoo User App Password ARN',
+    });
+    new cdk.CfnOutput(this, 'dbCredsArn', {
+      value: dbAdminCredsSecret.secretFullArn || '',
+      description: 'DB Credentials ARN',
+    });
+    new cdk.CfnOutput(this, 'dbEndpoint', {
+      value: rdsInstance.dbInstanceEndpointAddress,
+      description: 'DB Endpoint (Private)',
+    });
+
+    // for dev only
+    if(stage == 'dev') {
+      const pgAdminSecret = new secrets_manager.Secret(this, 'PgAdminSecret', {
+        secretName: `pgadmin-${stage}-creds`, 
+        generateSecretString: {
+          secretStringTemplate: JSON.stringify({
+            email: emailAddress,
+          }),
+          excludePunctuation: true,
+          includeSpace: false,
+          generateStringKey: 'password'
+        }
+      });
+      const pgAdminCluster = new ecs.Cluster(this, 'PgAdminEcsCluster', {vpc: vpc});
+
+      const pgAdminTaskDefinition = new ecs.FargateTaskDefinition(this, 'PgAdminTaskDef', {
+        memoryLimitMiB: 1024,
+        cpu: 512,
+      });
+      const pgAdminContainer = pgAdminTaskDefinition.addContainer("PgAdminCntr", {
+        image: ecs.ContainerImage.fromRegistry("dpage/pgadmin4:6.18"),
+        secrets: {
+          PGADMIN_DEFAULT_EMAIL: ecs.Secret.fromSecretsManager(pgAdminSecret, 'email'),
+          PGADMIN_DEFAULT_PASSWORD: ecs.Secret.fromSecretsManager(pgAdminSecret, 'password'),
+        },
+        portMappings: [
+          {
+            containerPort: 80,
+          }
+        ],
+        logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'pgadmin' }),
+      });
+
+      const pgAdminService = new ecs.FargateService(this, 'PgAdminService', {
+        cluster: pgAdminCluster,
+        taskDefinition: pgAdminTaskDefinition,
+        assignPublicIp: false,
+        vpcSubnets: {
+          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+        },
+        securityGroups: [appSG],
+        desiredCount: 1
+      });
+
+      const pgAdminLb = new elbv2.ApplicationLoadBalancer(this, 'PGAdminLB', { vpc, internetFacing: true, securityGroup: lbSG });
+      const listener = pgAdminLb.addListener('PgAdminListener', { port: 80 });
+      const pgAdminTargetGroup = listener.addTargets('PgAdminTG', {
+        port: 80,
+        targetGroupName: 'PgAdminTG',
+        targets: [pgAdminService.loadBalancerTarget({
+          containerName: 'PgAdminCntr',
+          containerPort: 80,
+        })],
+      });
+      pgAdminTargetGroup.configureHealthCheck({healthyHttpCodes: '200', path: "/misc/ping"});
+
+      new cdk.CfnOutput(this, 'pgAdminLoadBalancerUrl', {
+        value: `http://${pgAdminLb.loadBalancerDnsName}`,
+        description: 'PgAdmin Load Balancer URL',
+      });
+      new cdk.CfnOutput(this, 'pgAdminSecretArn', {
+        value: pgAdminSecret.secretFullArn || '',
+        description: 'PgAdmin User Email Address',
+      });
+    }
   }
 }
